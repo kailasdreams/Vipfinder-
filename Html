@@ -1,1 +1,48 @@
 
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>F5 ASM Policy Viewer</title>
+    <style>
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+        th { background-color: #f4f4f4; }
+    </style>
+</head>
+<body>
+    <h1>F5 ASM Policy Details</h1>
+    <table id="asmTable">
+        <thead>
+            <tr>
+                <th>Policy Name</th>
+                <th>Enforcement Mode</th>
+                <th>Direct VIPs</th>
+                <th>Manual VIPs</th>
+            </tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+
+    <script>
+        window.onload = () => {
+            fetch('/api/asm-policies')
+                .then(response => response.json())
+                .then(data => {
+                    const tableBody = document.querySelector('#asmTable tbody');
+                    data.forEach(row => {
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = `
+                            <td>${row.policy_name}</td>
+                            <td>${row.enforcement_mode}</td>
+                            <td>${row.direct_vips}</td>
+                            <td>${row.manual_vips}</td>
+                        `;
+                        tableBody.appendChild(tr);
+                    });
+                });
+        };
+    </script>
+</body>
+</html>
