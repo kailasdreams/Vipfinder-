@@ -8,37 +8,37 @@ import threading
 import time
 
 app = Flask(__name__)
-CACHE_FILE = os.path.join(os.path.dirname(__file__), 'vip_cache.json')
+
+# Hardcoded credentials (stored securely in a vault or .env in real production)
+USERNAME = "admin"
+PASSWORD = "yourStrongPassword"
+
 CSV_FILE = os.path.join(os.path.dirname(__file__), 'ltms.csv')
+CACHE_FILE = os.path.join(os.path.dirname(__file__), 'vip_cache.json')
 CACHE_UPDATE_INTERVAL = 86400  # 24 hours
 
-vip_cache = []  # global variable for storing VIP data
+vip_cache = []  # Global cache
 
 
-def get_ltm_list():
-    ltms = []
+def get_device_list():
+    devices = []
     try:
         with open(CSV_FILE, newline='') as csvfile:
-            reader = csv.DictReader(csvfile)
+            reader = csv.reader(csvfile)
             for row in reader:
-                ltms.append({
-                    'address': row['address'],
-                    'credentials': {
-                        'username': row['username'],
-                        'password': row['password']
-                    }
-                })
+                if row:  # skip blank rows
+                    devices.append(row[0].strip())
     except Exception as e:
-        print(f"Error reading LTM CSV: {e}")
-    return ltms
+        print(f"Error reading ltms.csv: {e}")
+    return devices
 
 
-def fetch_vips_from_device(address, credentials):
+def fetch_vips_from_device(address):
     result = []
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(address, username=credentials['username'], password=credentials['password'], timeout=10)
+        ssh.connect(address, username=USERNAME, password=PASSWORD, timeout=10)
 
         cmd = "list ltm virtual all-properties"
         stdin, stdout, stderr = ssh.exec_command(cmd)
@@ -58,24 +58,23 @@ def fetch_vips_from_device(address, credentials):
 
         ssh.close()
     except Exception as e:
-        print(f"Error from {address}: {e}")
+        print(f"[ERROR] {address}: {e}")
     return result
 
 
 def update_cache():
     global vip_cache
     new_data = []
-    for ltm in get_ltm_list():
-        device_vips = fetch_vips_from_device(ltm['address'], ltm['credentials'])
-        new_data.extend(device_vips)
+    for device in get_device_list():
+        new_data.extend(fetch_vips_from_device(device))
 
     vip_cache = new_data
     try:
         with open(CACHE_FILE, 'w') as f:
             json.dump(vip_cache, f, indent=2)
-        print("Cache updated successfully.")
+        print("✅ Cache updated.")
     except Exception as e:
-        print(f"Error writing cache: {e}")
+        print(f"[ERROR] Writing cache: {e}")
 
 
 def load_cache():
@@ -84,22 +83,23 @@ def load_cache():
         try:
             with open(CACHE_FILE, 'r') as f:
                 vip_cache = json.load(f)
-            print("Cache loaded.")
+            print("✅ Cache loaded from file.")
         except Exception as e:
-            print(f"Failed to load cache: {e}")
+            print(f"[ERROR] Loading cache: {e}")
             vip_cache = []
     else:
-        print("No cache file found. Creating initial cache...")
+        print("⚠️ No cache file found. Generating initial cache...")
         update_cache()
 
 
-def schedule_cache_updates():
-    def updater():
+def schedule_cache_update():
+    def background_updater():
         while True:
             time.sleep(CACHE_UPDATE_INTERVAL)
+            print("⏰ Background cache update started...")
             update_cache()
 
-    thread = threading.Thread(target=updater, daemon=True)
+    thread = threading.Thread(target=background_updater, daemon=True)
     thread.start()
 
 
@@ -108,7 +108,7 @@ def index():
     ip = ''
     results = []
     if request.method == 'POST':
-        ip = request.form['ip_address']
+        ip = request.form['ip_address'].strip()
         for entry in vip_cache:
             if ip in entry['destination']:
                 results.append(entry)
@@ -117,5 +117,5 @@ def index():
 
 if __name__ == '__main__':
     load_cache()
-    schedule_cache_updates()
+    schedule_cache_update()
     app.run(debug=True)
