@@ -1,24 +1,25 @@
 from flask import Flask, render_template, request
-import paramiko
-import re
+import requests
 import csv
 import os
 import json
 import threading
 import time
+import re
 
 app = Flask(__name__)
 
-# Hardcoded credentials
+# Configuration
 USERNAME = "admin"
-PASSWORD = "yourStrongPassword"  # Replace with actual password
-
+PASSWORD = "yourStrongPassword"  # Change this
 CSV_FILE = os.path.join(os.path.dirname(__file__), 'ltms.csv')
 CACHE_FILE = os.path.join(os.path.dirname(__file__), 'vip_cache.json')
 CACHE_UPDATE_INTERVAL = 86400  # 24 hours
 
 vip_cache = []
 
+# Disable SSL warnings
+requests.packages.urllib3.disable_warnings()
 
 def get_device_list():
     devices = []
@@ -32,51 +33,43 @@ def get_device_list():
         print(f"Error reading ltms.csv: {e}")
     return devices
 
+def extract_ip(destination):
+    match = re.search(r'/(\d+\.\d+\.\d+\.\d+):\d+', destination)
+    return match.group(1) if match else destination
 
-def fetch_vips_from_device(address):
-    result = []
+def get_vips_from_device(ip):
+    url = f"https://{ip}/mgmt/tm/ltm/virtual?$select=name,destination,partition"
+    vips = []
     try:
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(address, username=USERNAME, password=PASSWORD, timeout=10)
+        response = requests.get(url, auth=(USERNAME, PASSWORD), verify=False, timeout=10)
+        response.raise_for_status()
+        data = response.json()
 
-        # Fetch VIPs from all partitions
-        cmd = 'tmsh -c "cd / ; list ltm virtual recursive"'
-        stdin, stdout, stderr = ssh.exec_command(cmd)
-        output = stdout.read().decode()
-
-        virtuals = re.split(r'ltm virtual (\S+) \{', output)
-        for i in range(1, len(virtuals), 2):
-            name = virtuals[i]
-            block = virtuals[i + 1]
-            dest_match = re.search(r'destination\s+(\S+)', block)
-            destination = dest_match.group(1) if dest_match else 'Unknown'
-            result.append({
-                'device': address,
-                'vip_name': name,
-                'destination': destination
+        for item in data.get("items", []):
+            vips.append({
+                "device": ip,
+                "vip_name": item.get("name"),
+                "destination": item.get("destination", ""),
+                "partition": item.get("partition", "Common")
             })
-
-        ssh.close()
-    except Exception as e:
-        print(f"[ERROR] {address}: {e}")
-    return result
-
+    except requests.RequestException as e:
+        print(f"[ERROR] Failed to fetch from {ip}: {e}")
+    return vips
 
 def update_cache():
     global vip_cache
-    new_data = []
+    all_vips = []
     for device in get_device_list():
-        new_data.extend(fetch_vips_from_device(device))
+        print(f"Fetching VIPs from {device}...")
+        all_vips.extend(get_vips_from_device(device))
 
-    vip_cache = new_data
+    vip_cache = all_vips
     try:
         with open(CACHE_FILE, 'w') as f:
             json.dump(vip_cache, f, indent=2)
         print("✅ Cache updated.")
     except Exception as e:
         print(f"[ERROR] Writing cache: {e}")
-
 
 def load_cache():
     global vip_cache
@@ -89,20 +82,17 @@ def load_cache():
             print(f"[ERROR] Loading cache: {e}")
             vip_cache = []
     else:
-        print("⚠️ No cache file found. Generating initial cache...")
+        print("⚠️ No cache found, generating...")
         update_cache()
 
-
 def schedule_cache_update():
-    def background_updater():
+    def updater():
         while True:
             time.sleep(CACHE_UPDATE_INTERVAL)
-            print("⏰ Background cache update started...")
+            print("⏰ Updating cache in background...")
             update_cache()
-
-    thread = threading.Thread(target=background_updater, daemon=True)
+    thread = threading.Thread(target=updater, daemon=True)
     thread.start()
-
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -111,10 +101,9 @@ def index():
     if request.method == 'POST':
         ip = request.form['ip_address'].strip()
         for entry in vip_cache:
-            if ip in entry['destination']:
+            if ip in extract_ip(entry['destination']):
                 results.append(entry)
     return render_template('index.html', results=results, ip=ip)
-
 
 if __name__ == '__main__':
     load_cache()
