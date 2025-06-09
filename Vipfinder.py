@@ -9,15 +9,15 @@ import time
 
 app = Flask(__name__)
 
-# Hardcoded credentials (stored securely in a vault or .env in real production)
+# Hardcoded credentials
 USERNAME = "admin"
-PASSWORD = "yourStrongPassword"
+PASSWORD = "yourStrongPassword"  # Replace with actual password
 
 CSV_FILE = os.path.join(os.path.dirname(__file__), 'ltms.csv')
 CACHE_FILE = os.path.join(os.path.dirname(__file__), 'vip_cache.json')
 CACHE_UPDATE_INTERVAL = 86400  # 24 hours
 
-vip_cache = []  # Global cache
+vip_cache = []
 
 
 def get_device_list():
@@ -26,7 +26,7 @@ def get_device_list():
         with open(CSV_FILE, newline='') as csvfile:
             reader = csv.reader(csvfile)
             for row in reader:
-                if row:  # skip blank rows
+                if row:
                     devices.append(row[0].strip())
     except Exception as e:
         print(f"Error reading ltms.csv: {e}")
@@ -40,7 +40,8 @@ def fetch_vips_from_device(address):
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(address, username=USERNAME, password=PASSWORD, timeout=10)
 
-        cmd = "list ltm virtual all-properties"
+        # Fetch VIPs from all partitions
+        cmd = 'tmsh -c "cd / ; list ltm virtual recursive"'
         stdin, stdout, stderr = ssh.exec_command(cmd)
         output = stdout.read().decode()
 
