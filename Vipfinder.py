@@ -1,64 +1,121 @@
-# app.py
-from flask import Flask, jsonify, render_template
-import requests
-import urllib3
-from requests.auth import HTTPBasicAuth
+from flask import Flask, render_template, request
+import paramiko
+import re
+import csv
+import os
+import json
+import threading
+import time
 
 app = Flask(__name__)
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+CACHE_FILE = os.path.join(os.path.dirname(__file__), 'vip_cache.json')
+CSV_FILE = os.path.join(os.path.dirname(__file__), 'ltms.csv')
+CACHE_UPDATE_INTERVAL = 86400  # 24 hours
 
-f5_host = "https://10.1.1.11"
-username = "admin"
-password = "kailas@123"
-auth = HTTPBasicAuth(username, password)
+vip_cache = []  # global variable for storing VIP data
 
-def fetch_json(url):
+
+def get_ltm_list():
+    ltms = []
     try:
-        resp = requests.get(url, auth=auth, verify=False)
-        resp.raise_for_status()
-        return resp.json()
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching data from {url}: {e}")
-        return None
+        with open(CSV_FILE, newline='') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                ltms.append({
+                    'address': row['address'],
+                    'credentials': {
+                        'username': row['username'],
+                        'password': row['password']
+                    }
+                })
+    except Exception as e:
+        print(f"Error reading LTM CSV: {e}")
+    return ltms
 
-def get_asm_policies():
-    policies_url = f"{f5_host}/mgmt/tm/asm/policies?$select=name,id,enforcementMode"
-    all_policies_data = fetch_json(policies_url)
-    all_policies = all_policies_data.get("items", []) if all_policies_data else []
 
+def fetch_vips_from_device(address, credentials):
     result = []
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(address, username=credentials['username'], password=credentials['password'], timeout=10)
 
-    for policy in all_policies:
-        policy_name = policy.get("name", "N/A")
-        policy_id = policy.get("id")
-        enforcement_mode = policy.get("enforcementMode", "N/A")
-        direct_vips = "None"
-        manual_vips = "None"
+        cmd = "list ltm virtual all-properties"
+        stdin, stdout, stderr = ssh.exec_command(cmd)
+        output = stdout.read().decode()
 
-        if policy_id:
-            detailed_policy_url = f"{f5_host}/mgmt/tm/asm/policies/{policy_id}?$select=virtualServers,manualVirtualServers"
-            detailed_policy_data = fetch_json(detailed_policy_url)
-            if detailed_policy_data:
-                direct_vips_list = detailed_policy_data.get("virtualServers", [])
-                manual_vips_list = detailed_policy_data.get("manualVirtualServers", [])
-                direct_vips = ", ".join(direct_vips_list) if direct_vips_list else "None"
-                manual_vips = ", ".join(manual_vips_list) if manual_vips_list else "None"
-        result.append({
-            "policy_name": policy_name,
-            "enforcement_mode": enforcement_mode,
-            "direct_vips": direct_vips,
-            "manual_vips": manual_vips
-        })
+        virtuals = re.split(r'ltm virtual (\S+) \{', output)
+        for i in range(1, len(virtuals), 2):
+            name = virtuals[i]
+            block = virtuals[i + 1]
+            dest_match = re.search(r'destination\s+(\S+)', block)
+            destination = dest_match.group(1) if dest_match else 'Unknown'
+            result.append({
+                'device': address,
+                'vip_name': name,
+                'destination': destination
+            })
+
+        ssh.close()
+    except Exception as e:
+        print(f"Error from {address}: {e}")
     return result
 
-@app.route('/')
-def index():
-    return render_template('index.html')
 
-@app.route('/api/asm-policies')
-def asm_policies():
-    data = get_asm_policies()
-    return jsonify(data)
+def update_cache():
+    global vip_cache
+    new_data = []
+    for ltm in get_ltm_list():
+        device_vips = fetch_vips_from_device(ltm['address'], ltm['credentials'])
+        new_data.extend(device_vips)
+
+    vip_cache = new_data
+    try:
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(vip_cache, f, indent=2)
+        print("Cache updated successfully.")
+    except Exception as e:
+        print(f"Error writing cache: {e}")
+
+
+def load_cache():
+    global vip_cache
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, 'r') as f:
+                vip_cache = json.load(f)
+            print("Cache loaded.")
+        except Exception as e:
+            print(f"Failed to load cache: {e}")
+            vip_cache = []
+    else:
+        print("No cache file found. Creating initial cache...")
+        update_cache()
+
+
+def schedule_cache_updates():
+    def updater():
+        while True:
+            time.sleep(CACHE_UPDATE_INTERVAL)
+            update_cache()
+
+    thread = threading.Thread(target=updater, daemon=True)
+    thread.start()
+
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    ip = ''
+    results = []
+    if request.method == 'POST':
+        ip = request.form['ip_address']
+        for entry in vip_cache:
+            if ip in entry['destination']:
+                results.append(entry)
+    return render_template('index.html', results=results, ip=ip)
+
 
 if __name__ == '__main__':
+    load_cache()
+    schedule_cache_updates()
     app.run(debug=True)
